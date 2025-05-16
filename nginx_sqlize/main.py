@@ -14,11 +14,11 @@ from tqdm import tqdm
 from nginx_sqlize.database import Database
 from nginx_sqlize.parser import NginxLogParser
 
-# configs
+# configuration
 DEFAULT_BATCH_SIZE = 1000
 DEFAULT_DB_PATH = 'nginx_logs.db'
 
-# logging setup
+# setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -141,10 +141,15 @@ def process_log_file(
             if start_pos > 0:
                 f.seek(start_pos)
             
+            # calculate file size for progress tracking
+            remaining_size = file_size - start_pos
+            
             # create progress bar
-            with tqdm(total=file_size - start_pos, unit='B', unit_scale=True, desc=f"Processing {os.path.basename(filename)}") as pbar:
-                for line in f:
-                    current_pos = f.tell()
+            with tqdm(total=remaining_size, unit='B', unit_scale=True, desc=f"Processing {os.path.basename(filename)}") as pbar:
+                # Read line by line without using 'for line in f:'
+                line = f.readline()
+                while line:
+                    line_bytes = len(line.encode('utf-8'))
                     
                     # parse the line
                     parsed = NginxLogParser.parse_to_tuple(line)
@@ -160,7 +165,10 @@ def process_log_file(
                         batch = []
                     
                     line_count += 1
-                    pbar.update(len(line.encode('utf-8')))  # update progress based on bytes read
+                    pbar.update(line_bytes)  # update progress based on bytes read
+                    
+                    # Read next line
+                    line = f.readline()
                     
                 # insert any remaining records
                 if batch:
@@ -298,6 +306,149 @@ def info(db: str, status: bool):
                 click.echo(f"- Processed files: {files_count}")
             except Exception as e:
                 click.echo(f"Error getting processed files count: {e}")
+
+
+# command to show most requested paths
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--limit', default=10, help='Number of results to display')
+def top_paths(db: str, limit: int):
+    """Show most requested paths."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_top_paths(limit)
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo(f"\nTop {len(results)} Requested Paths:")
+        for i, row in enumerate(results, 1):
+            click.echo(f"{i}. {row['request_path']} - {row['count']} requests")
+
+
+# command to show status code distribution
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+def status_codes(db: str):
+    """Show distribution of HTTP status codes."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_status_distribution()
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo("\nStatus Code Distribution:")
+        for row in results:
+            status = row['status']
+            count = row['count']
+            # Color code based on status category
+            if status < 300:
+                status_str = click.style(f"{status}", fg="green")
+            elif status < 400:
+                status_str = click.style(f"{status}", fg="blue")
+            elif status < 500:
+                status_str = click.style(f"{status}", fg="yellow")
+            else:
+                status_str = click.style(f"{status}", fg="red")
+                
+            click.echo(f"{status_str}: {count} requests")
+
+
+# command to show bot activity
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--limit', default=10, help='Number of results to display')
+def bots(db: str, limit: int):
+    """Show potential bot activity."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_bot_activity(limit)
+        
+        if not results:
+            click.echo("No bot activity found")
+            return
+            
+        click.echo(f"\nPotential Bot Activity (Top {len(results)}):")
+        for i, row in enumerate(results, 1):
+            click.echo(f"{i}. {row['user_agent']}")
+            click.echo(f"   Requests: {row['request_count']}, Unique URLs: {row['unique_paths']}")
+            click.echo(f"   First seen: {row['first_seen']}")
+            click.echo(f"   Last seen: {row['last_seen']}")
+            click.echo("")
+
+
+# command to show traffic by time period
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--period', type=click.Choice(['day', 'hour']), default='day', help='Time grouping period')
+def traffic(db: str, period: str):
+    """Show traffic by time period."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_requests_by_time(period)
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo(f"\nTraffic by {period.capitalize()}:")
+        for row in results:
+            click.echo(f"{row['time_period']}: {row['count']} requests")
+
+
+# command to show error rates
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--period', type=click.Choice(['day', 'hour']), default='day', help='Time grouping period')
+def errors(db: str, period: str):
+    """Show error rates by time period."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_error_rates(period)
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo(f"\nError Rates by {period.capitalize()}:")
+        for row in results:
+            time_period = row['time_period']
+            total = row['total_requests']
+            client_errors = row['client_errors']
+            server_errors = row['server_errors']
+            error_rate = row['error_rate']
+            
+            # Color code based on error rate
+            if error_rate < 1:
+                rate_str = click.style(f"{error_rate}%", fg="green")
+            elif error_rate < 5:
+                rate_str = click.style(f"{error_rate}%", fg="yellow")
+            else:
+                rate_str = click.style(f"{error_rate}%", fg="red")
+                
+            click.echo(f"{time_period}: {rate_str} ({client_errors} client errors, {server_errors} server errors, {total} total)")
+
+
+# command to show top referrers
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--limit', default=10, help='Number of results to display')
+def referrers(db: str, limit: int):
+    """Show top referrers."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_top_referrers(limit)
+        
+        if not results:
+            click.echo("No referrer data found")
+            return
+            
+        click.echo(f"\nTop {len(results)} Referrers:")
+        for i, row in enumerate(results, 1):
+            click.echo(f"{i}. {row['referer']} - {row['count']} requests")
 
 
 if __name__ == '__main__':
