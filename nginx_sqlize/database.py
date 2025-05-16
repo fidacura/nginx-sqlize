@@ -189,6 +189,16 @@ class Database:
             print(f"Error getting log count: {e}")
             return 0
 
+    # get query interface for analytics
+    def get_queries(self):
+        """Get query interface for analytics.
+        
+        Returns:
+            LogQueries object for analytics
+        """
+        from nginx_sqlize.queries import LogQueries
+        return LogQueries(self.conn)
+
     # support for using with "with" statement
     def __enter__(self):
         """Context manager entry."""
