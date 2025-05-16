@@ -1,0 +1,48 @@
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# venv
+venv/
+ENV/
+env/
+
+# sqlite
+*.db
+*.sqlite
+*.sqlite3
+
+# logs
+*.log
+*.log.*
+*.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# tests
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
