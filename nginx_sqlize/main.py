@@ -450,6 +450,124 @@ def referrers(db: str, limit: int):
         for i, row in enumerate(results, 1):
             click.echo(f"{i}. {row['referer']} - {row['count']} requests")
 
+# command to show top IP addresses
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--limit', default=10, help='Number of results to display')
+def top_ips(db: str, limit: int):
+    """Show most active IP addresses."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_top_ips(limit)
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo(f"\nTop {len(results)} IP Addresses:")
+        for i, row in enumerate(results, 1):
+            click.echo(f"{i}. {row['remote_addr']} - {row['count']} requests")
+
+
+# command to show HTTP method distribution
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+def methods(db: str):
+    """Show distribution of HTTP methods."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_method_distribution()
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo("\nHTTP Method Distribution:")
+        for row in results:
+            click.echo(f"{row['request_method']}: {row['count']} requests")
+
+
+# command to show response sizes
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--limit', default=10, help='Number of results to display')
+def response_sizes(db: str, limit: int):
+    """Show paths with largest response sizes."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_response_sizes(limit)
+        
+        if not results:
+            click.echo("No data found")
+            return
+            
+        click.echo(f"\nTop {len(results)} Paths by Response Size:")
+        for i, row in enumerate(results, 1):
+            avg_size_kb = row['avg_size'] / 1024 if row['avg_size'] else 0
+            total_size_mb = row['total_size'] / (1024*1024) if row['total_size'] else 0
+            click.echo(f"{i}. {row['request_path']}")
+            click.echo(f"   Average: {avg_size_kb:.2f} KB, Max: {row['max_size']} bytes")
+            click.echo(f"   Total: {total_size_mb:.2f} MB, Requests: {row['count']}")
+
+
+# command to show potential attacks
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--limit', default=20, help='Number of results to display')
+def attacks(db: str, limit: int):
+    """Show potential attack patterns."""
+    with Database(db) as database:
+        queries = database.get_queries()
+        results = queries.get_potential_attacks(limit)
+        
+        if not results:
+            click.echo("No potential attacks found")
+            return
+            
+        click.echo(f"\nPotential Attack Attempts (Top {len(results)}):")
+        for i, row in enumerate(results, 1):
+            click.echo(f"{i}. Path: {row['request_path']}")
+            click.echo(f"   IP: {row['remote_addr']}, Attempts: {row['count']}")
+
+
+# command to export data for external analysis
+@cli.command()
+@click.option('--db', required=True, help='Path to SQLite database file')
+@click.option('--output', required=True, help='Path to output CSV file')
+@click.option('--query', type=click.Choice(['ips', 'paths', 'attacks', 'bots', 'status']), default='ips', 
+              help='Type of data to export')
+@click.option('--limit', default=1000, help='Maximum number of rows to export')
+def export(db: str, output: str, query: str, limit: int):
+    """Export data for analysis with external tools."""
+    import csv
+    
+    with Database(db) as database:
+        queries = database.get_queries()
+        
+        # Get data based on query type
+        if query == 'ips':
+            results = queries.get_top_ips(limit=limit)
+        elif query == 'paths':
+            results = queries.get_top_paths(limit=limit)
+        elif query == 'attacks':
+            results = queries.get_potential_attacks(limit=limit)
+        elif query == 'bots':
+            results = queries.get_bot_activity(limit=limit)
+        elif query == 'status':
+            results = queries.get_status_distribution()
+        
+        if not results:
+            click.echo("No data found to export")
+            return
+        
+        # Write to CSV
+        with open(output, 'w', newline='') as f:
+            if results:
+                writer = csv.DictWriter(f, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+                click.echo(f"Exported {len(results)} rows to {output}")
+
 
 if __name__ == '__main__':
     cli()
