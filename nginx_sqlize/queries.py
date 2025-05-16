@@ -190,3 +190,117 @@ class LogQueries:
         except sqlite3.Error as e:
             print(f"Error getting top referrers: {e}")
             return []
+        
+    # get top IP addresses
+    def get_top_ips(self, limit: int = 10) -> List[Dict]:
+        """Get most active IP addresses.
+        
+        Args:
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of dictionaries with IP and count information
+        """
+        try:
+            query = """
+            SELECT remote_addr, COUNT(*) as count
+            FROM logs
+            GROUP BY remote_addr
+            ORDER BY count DESC
+            LIMIT ?
+            """
+            
+            self.cursor.execute(query, (limit,))
+            return [dict(row) for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error getting top IPs: {e}")
+            return []
+
+    # get distribution of HTTP methods
+    def get_method_distribution(self) -> List[Dict]:
+        """Get distribution of HTTP request methods.
+        
+        Returns:
+            List of dictionaries with method and count
+        """
+        try:
+            query = """
+            SELECT request_method, COUNT(*) as count
+            FROM logs
+            GROUP BY request_method
+            ORDER BY count DESC
+            """
+            
+            self.cursor.execute(query)
+            return [dict(row) for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error getting method distribution: {e}")
+            return []
+
+    # get average response size by path
+    def get_response_sizes(self, limit: int = 10) -> List[Dict]:
+        """Get average response size by path.
+        
+        Args:
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of dictionaries with path and size information
+        """
+        try:
+            query = """
+            SELECT 
+                request_path, 
+                COUNT(*) as count,
+                AVG(bytes_sent) as avg_size,
+                MAX(bytes_sent) as max_size,
+                SUM(bytes_sent) as total_size
+            FROM logs
+            GROUP BY request_path
+            ORDER BY avg_size DESC
+            LIMIT ?
+            """
+            
+            self.cursor.execute(query, (limit,))
+            return [dict(row) for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error getting response sizes: {e}")
+            return []
+
+    # identify potential attack patterns
+    def get_potential_attacks(self, limit: int = 10) -> List[Dict]:
+        """Identify potential attack patterns.
+        
+        Args:
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of dictionaries with attack patterns
+        """
+        try:
+            query = """
+            SELECT 
+                request_path,
+                remote_addr,
+                COUNT(*) as count
+            FROM logs
+            WHERE 
+                request_path LIKE '%../../%' OR
+                request_path LIKE '%.php%' OR
+                request_path LIKE '%shell%' OR
+                request_path LIKE '%admin%' OR
+                request_path LIKE '%wp-%' OR
+                request_path LIKE '%.git%' OR
+                request_path LIKE '%passwd%' OR
+                request_path LIKE '%.env%' OR
+                request_path LIKE '%credentials%'
+            GROUP BY request_path, remote_addr
+            ORDER BY count DESC
+            LIMIT ?
+            """
+            
+            self.cursor.execute(query, (limit,))
+            return [dict(row) for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error getting potential attacks: {e}")
+            return []
