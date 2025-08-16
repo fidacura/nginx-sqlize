@@ -1,573 +1,814 @@
-"""Command-line interface for nginx-sqlize."""
+"""
+nginx-sqlize streamlined cli interface.
+"""
 
-import os
-import sys
-import hashlib
-import gzip
-import logging
 from pathlib import Path
-from typing import List, Optional, Iterator, BinaryIO, TextIO
+from typing import Optional, List, Dict, Any
+import json
+import sys
 
-import click
-from tqdm import tqdm
+import typer
+from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.panel import Panel
+from rich import print as rprint
 
-from nginx_sqlize.database import Database
-from nginx_sqlize.parser import NginxLogParser
+try:
+    from .core import create_processor
+    from .queries import QueryEngine
+except ImportError:
+    # fallback for direct execution
+    from core import create_processor
+    from queries import QueryEngine
 
-# configuration
-DEFAULT_BATCH_SIZE = 1000
-DEFAULT_DB_PATH = 'nginx_logs.db'
 
-# setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# initialize rich console and typer app
+console = Console()
+app = typer.Typer(
+    name="nginx-sqlize",
+    help="Process Nginx logs into SQLite for easy querying and analysis.",
+    rich_markup_mode="rich"
 )
-logger = logging.getLogger('nginx-sqlize')
 
 
-# compute a hash to detect if a file has changed
-def compute_file_hash(filename: str, sample_size: int = 8192) -> str:
-    """Compute a hash of the first bytes of a file to detect changes.
-
-    Args:
-        filename: Path to the file
-        sample_size: Number of bytes to read from start of file
-
-    Returns:
-        Hex digest of the hash
+# ========================= commands ~ data ingestion =========================
+@app.command()
+def ingest(
+    logs: str = typer.Argument(..., help="Log file pattern (e.g., /var/log/nginx/*.log)"),
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path (auto-generated if not specified)"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output database name (without extension)"),
+    batch_size: int = typer.Option(10000, "--batch-size", "-b", help="Batch size for processing"),
+    force: bool = typer.Option(False, "--force", "-f", help="Reprocess all files"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output")
+) -> None:
     """
-    try:
-        with open(filename, 'rb') as f:
-            sample = f.read(sample_size)
-            return hashlib.md5(sample).hexdigest()
-    except Exception as e:
-        logger.error(f"Error computing file hash for {filename}: {e}")
-        return ""
-
-
-# open log file, handling both plain text and gzipped files
-def open_log_file(filename: str) -> TextIO:
-    """Open a log file, handling gzip if needed.
-
-    Args:
-        filename: Path to the log file
-
-    Returns:
-        File object
-    """
-    try:
-        if filename.endswith('.gz'):
-            return gzip.open(filename, 'rt', encoding='utf-8')
-        return open(filename, 'r', encoding='utf-8')
-    except Exception as e:
-        logger.error(f"Error opening file {filename}: {e}")
-        raise
-
-
-# find all log files matching a pattern
-def find_log_files(path_pattern: str) -> List[Path]:
-    """Find log files matching the given pattern.
+    Ingest nginx logs into sqlite database.
     
-    Args:
-        path_pattern: Glob pattern for log files
-        
-    Returns:
-        List of Path objects for matching files
+    Automatically handles gzipped files, resumable processing, and
+    provides real-time progress feedback with rich output.
     """
-    # Handle absolute and relative paths correctly
-    if os.path.isabs(path_pattern):
-        base_path = Path(os.path.dirname(path_pattern))
-        pattern = os.path.basename(path_pattern)
-        log_files = sorted(base_path.glob(pattern))
-    else:
-        log_files = sorted(Path().glob(path_pattern))
     
-    # Filter out directories
-    return [f for f in log_files if f.is_file()]
-
-
-# process a single log file and insert entries into database
-def process_log_file(
-    db: Database, 
-    filename: str, 
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    force_reprocess: bool = False
-) -> int:
-    """Process a single log file and insert entries into the database.
-
-    Args:
-        db: Database instance
-        filename: Path to the log file
-        batch_size: Number of records to insert in a batch
-        force_reprocess: Whether to reprocess the file even if already processed
-
-    Returns:
-        Number of processed lines
-    """
-    try:
-        # get absolute path and file stats
-        filename = os.path.abspath(filename)
-        file_size = os.path.getsize(filename)
-        file_hash = compute_file_hash(filename)
-        
-        if not file_hash:
-            logger.warning(f"Could not compute hash for {filename}, will process anyway")
-        
-        # check if file was already processed
-        processed = db.get_processed_file(filename)
-        
-        # skip if already processed and not forced to reprocess
-        if processed and not force_reprocess:
-            # if hash matches, skip the file
-            if processed['file_hash'] == file_hash:
-                click.echo(f"Skipping already processed file: {filename}")
-                return 0
-            else:
-                click.echo(f"File has changed since last processing: {filename}")
-        
-        # determine starting position
-        start_pos = 0
-        if processed and not force_reprocess:
-            start_pos = processed['last_position']
-        
-        # open and process the file
-        line_count = 0
-        parsed_count = 0
-        batch = []
-        
-        with open_log_file(filename) as f:
-            # skip to last position if resuming
-            if start_pos > 0:
-                f.seek(start_pos)
-            
-            # calculate file size for progress tracking
-            remaining_size = file_size - start_pos
-            
-            # create progress bar
-            with tqdm(total=remaining_size, unit='B', unit_scale=True, desc=f"Processing {os.path.basename(filename)}") as pbar:
-                # Read line by line without using 'for line in f:'
-                line = f.readline()
-                while line:
-                    line_bytes = len(line.encode('utf-8'))
-                    
-                    # parse the line
-                    parsed = NginxLogParser.parse_to_tuple(line)
-                    if parsed:
-                        batch.append(parsed)
-                        parsed_count += 1
-                        
-                    # insert batch if it reaches the specified size
-                    if len(batch) >= batch_size:
-                        inserted = db.insert_logs(batch)
-                        if inserted != len(batch):
-                            logger.warning(f"Not all entries were inserted: {inserted}/{len(batch)}")
-                        batch = []
-                    
-                    line_count += 1
-                    pbar.update(line_bytes)  # update progress based on bytes read
-                    
-                    # Read next line
-                    line = f.readline()
-                    
-                # insert any remaining records
-                if batch:
-                    db.insert_logs(batch)
-        
-        # update processed file information
-        db.update_processed_file(
-            filename=filename,
-            position=file_size,  # whole file has been processed
-            lines=line_count,
-            file_hash=file_hash
-        )
-        
-        logger.info(f"Processed {line_count} lines, extracted {parsed_count} valid entries from {filename}")
-        return line_count
-    
-    except Exception as e:
-        logger.error(f"Error processing {filename}: {e}")
-        raise
-
-
-# main command group for cli
-@click.group()
-def cli():
-    """Process Nginx logs into SQLite database for easy querying."""
-    pass
-
-
-# command to ingest logs into the database
-@cli.command()
-@click.option(
-    '--logs', 
-    required=True, 
-    help='Path to log file(s). Supports glob patterns (e.g., /var/log/nginx/*.log).'
-)
-@click.option(
-    '--db', 
-    default=DEFAULT_DB_PATH, 
-    help=f'Path to SQLite database file. Default: {DEFAULT_DB_PATH}'
-)
-@click.option(
-    '--batch-size', 
-    default=DEFAULT_BATCH_SIZE, 
-    help=f'Number of log entries to insert in a batch. Default: {DEFAULT_BATCH_SIZE}'
-)
-@click.option(
-    '--force', 
-    is_flag=True, 
-    help='Reprocess files even if they have been processed before.'
-)
-@click.option(
-    '--verbose', '-v',
-    is_flag=True,
-    help='Enable verbose output with additional processing details.'
-)
-def ingest(logs: str, db: str, batch_size: int, force: bool, verbose: bool):
-    """Ingest Nginx logs into SQLite database."""
-    # configure logging based on verbosity
     if verbose:
-        logger.setLevel(logging.DEBUG)
+        console.print("[dim]Initializing processor...[/dim]")
     
-    # find log files matching pattern
-    log_files = find_log_files(logs)
+    # smart database naming logic
+    db_path = _determine_database_path(logs, db, output, verbose)
+    
+    # validate database path for safety
+    db_path = _validate_db_path(db_path)
+    
+    # create processor with configuration
+    processor = create_processor(
+        db_path=db_path,
+        batch_size=batch_size
+    )
+    
+    # setup logging based on verbose mode
+    processor.setup_logging(verbose)
+    
+    # find log files
+    log_files = processor.find_log_files(logs)
     
     if not log_files:
-        click.echo(f"No log files found matching: {logs}")
-        sys.exit(1)
+        console.print(f"[red]❌ no log files found matching: {logs}[/red]")
+        raise typer.Exit(1)
     
-    click.echo(f"Found {len(log_files)} log file(s) to process")
-    
-    # open database connection
-    with Database(db) as database:
-        total_processed = 0
-        files_processed = 0
+    if verbose:
+        console.print(f"[green]🔍 found {len(log_files)} log files[/green]")
+        console.print(f"[dim]📄 database: {db_path}[/dim]")
         
-        # process each log file
+        # warn user about force mode
+        if force:
+            console.print("[bright_yellow]⚠️  Force mode enabled ~ may create duplicate entries[/bright_yellow]")
+    else:
+        # non-verbose: just show essential info
+        if force:
+            console.print("[bright_yellow]⚠️  Force mode: may create duplicates[/bright_yellow]")
+    
+    # process files with progress tracking
+    total_processed = 0
+    total_inserted = 0
+    
+    if verbose:
+        # verbose mode: show detailed progress with spinner
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            
+            for log_file in log_files:
+                task = progress.add_task(f"processing {log_file.name}", total=None)
+                
+                try:
+                    result = processor.process_file(log_file, force=force)
+                    total_processed += result['processed']
+                    total_inserted += result['inserted']
+                    
+                    if result['processed'] == 0:
+                        progress.update(
+                            task, 
+                            description=f"⭐️ {log_file.name} (already processed)"
+                        )
+                    else:
+                        progress.update(
+                            task, 
+                            description=f"✅ {log_file.name} ({result['processed']} lines)"
+                        )
+                    
+                except Exception as e:
+                    progress.update(task, description=f"❌ {log_file.name} (failed)")
+                    console.print(f"[red]error: {e}[/red]")
+    
+    else:
+        # non-verbose mode: simple, clean output
         for log_file in log_files:
             try:
-                processed = process_log_file(
-                    db=database,
-                    filename=str(log_file),
-                    batch_size=batch_size,
-                    force_reprocess=force
-                )
-                total_processed += processed
-                if processed:
-                    files_processed += 1
-                    click.echo(f"Processed {processed} lines from {log_file}")
-            except Exception as e:
-                click.echo(f"Error processing {log_file}: {e}")
-                if verbose:
-                    import traceback
-                    click.echo(traceback.format_exc())
-        
-        # show summary
-        click.echo(f"\nSummary:")
-        click.echo(f"- Files processed: {files_processed}/{len(log_files)}")
-        click.echo(f"- Total lines processed: {total_processed}")
-        click.echo(f"- Total entries in database: {database.get_log_count()}")
-        click.echo(f"- Database location: {os.path.abspath(db)}")
-
-
-# command to show database information
-@cli.command()
-@click.option(
-    '--db',
-    required=True,
-    help='Path to SQLite database file.'
-)
-@click.option(
-    '--status',
-    is_flag=True,
-    help='Show overall database statistics.'
-)
-def info(db: str, status: bool):
-    """Display information about the database."""
-    if not os.path.exists(db):
-        click.echo(f"Database file not found: {db}")
-        sys.exit(1)
-        
-    with Database(db) as database:
-        click.echo(f"Database: {os.path.abspath(db)}")
-        click.echo(f"Size: {os.path.getsize(db) / (1024*1024):.2f} MB")
-        
-        # database statistics
-        if status:
-            click.echo("\nDatabase Statistics:")
-            click.echo(f"- Total log entries: {database.get_log_count()}")
-            
-            # get processed files
-            try:
-                database.cursor.execute("SELECT COUNT(*) as count FROM processed_files")
-                result = database.cursor.fetchone()
-                files_count = result['count'] if result else 0
-                click.echo(f"- Processed files: {files_count}")
-            except Exception as e:
-                click.echo(f"Error getting processed files count: {e}")
-
-
-# command to show most requested paths
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--limit', default=10, help='Number of results to display')
-def top_paths(db: str, limit: int):
-    """Show most requested paths."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_top_paths(limit)
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo(f"\nTop {len(results)} Requested Paths:")
-        for i, row in enumerate(results, 1):
-            click.echo(f"{i}. {row['request_path']} - {row['count']} requests")
-
-
-# command to show status code distribution
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-def status_codes(db: str):
-    """Show distribution of HTTP status codes."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_status_distribution()
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo("\nStatus Code Distribution:")
-        for row in results:
-            status = row['status']
-            count = row['count']
-            # Color code based on status category
-            if status < 300:
-                status_str = click.style(f"{status}", fg="green")
-            elif status < 400:
-                status_str = click.style(f"{status}", fg="blue")
-            elif status < 500:
-                status_str = click.style(f"{status}", fg="yellow")
-            else:
-                status_str = click.style(f"{status}", fg="red")
+                result = processor.process_file(log_file, force=force)
+                total_processed += result['processed']
+                total_inserted += result['inserted']
                 
-            click.echo(f"{status_str}: {count} requests")
-
-
-# command to show bot activity
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--limit', default=10, help='Number of results to display')
-def bots(db: str, limit: int):
-    """Show potential bot activity."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_bot_activity(limit)
-        
-        if not results:
-            click.echo("No bot activity found")
-            return
-            
-        click.echo(f"\nPotential Bot Activity (Top {len(results)}):")
-        for i, row in enumerate(results, 1):
-            click.echo(f"{i}. {row['user_agent']}")
-            click.echo(f"   Requests: {row['request_count']}, Unique URLs: {row['unique_paths']}")
-            click.echo(f"   First seen: {row['first_seen']}")
-            click.echo(f"   Last seen: {row['last_seen']}")
-            click.echo("")
-
-
-# command to show traffic by time period
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--period', type=click.Choice(['day', 'hour']), default='day', help='Time grouping period')
-def traffic(db: str, period: str):
-    """Show traffic by time period."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_requests_by_time(period)
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo(f"\nTraffic by {period.capitalize()}:")
-        for row in results:
-            click.echo(f"{row['time_period']}: {row['count']} requests")
-
-
-# command to show error rates
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--period', type=click.Choice(['day', 'hour']), default='day', help='Time grouping period')
-def errors(db: str, period: str):
-    """Show error rates by time period."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_error_rates(period)
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo(f"\nError Rates by {period.capitalize()}:")
-        for row in results:
-            time_period = row['time_period']
-            total = row['total_requests']
-            client_errors = row['client_errors']
-            server_errors = row['server_errors']
-            error_rate = row['error_rate']
-            
-            # Color code based on error rate
-            if error_rate < 1:
-                rate_str = click.style(f"{error_rate}%", fg="green")
-            elif error_rate < 5:
-                rate_str = click.style(f"{error_rate}%", fg="yellow")
-            else:
-                rate_str = click.style(f"{error_rate}%", fg="red")
+                if result['processed'] == 0:
+                    console.print(f"[yellow]⭐️ {log_file.name} already processed[/yellow]")
+                else:
+                    console.print(f"[green]✅ {log_file.name} ({result['processed']:,} lines)[/green]")
                 
-            click.echo(f"{time_period}: {rate_str} ({client_errors} client errors, {server_errors} server errors, {total} total)")
-
-
-# command to show top referrers
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--limit', default=10, help='Number of results to display')
-def referrers(db: str, limit: int):
-    """Show top referrers."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_top_referrers(limit)
-        
-        if not results:
-            click.echo("No referrer data found")
-            return
-            
-        click.echo(f"\nTop {len(results)} Referrers:")
-        for i, row in enumerate(results, 1):
-            click.echo(f"{i}. {row['referer']} - {row['count']} requests")
-
-# command to show top IP addresses
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--limit', default=10, help='Number of results to display')
-def top_ips(db: str, limit: int):
-    """Show most active IP addresses."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_top_ips(limit)
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo(f"\nTop {len(results)} IP Addresses:")
-        for i, row in enumerate(results, 1):
-            click.echo(f"{i}. {row['remote_addr']} - {row['count']} requests")
-
-
-# command to show HTTP method distribution
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-def methods(db: str):
-    """Show distribution of HTTP methods."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_method_distribution()
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo("\nHTTP Method Distribution:")
-        for row in results:
-            click.echo(f"{row['request_method']}: {row['count']} requests")
-
-
-# command to show response sizes
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--limit', default=10, help='Number of results to display')
-def response_sizes(db: str, limit: int):
-    """Show paths with largest response sizes."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_response_sizes(limit)
-        
-        if not results:
-            click.echo("No data found")
-            return
-            
-        click.echo(f"\nTop {len(results)} Paths by Response Size:")
-        for i, row in enumerate(results, 1):
-            avg_size_kb = row['avg_size'] / 1024 if row['avg_size'] else 0
-            total_size_mb = row['total_size'] / (1024*1024) if row['total_size'] else 0
-            click.echo(f"{i}. {row['request_path']}")
-            click.echo(f"   Average: {avg_size_kb:.2f} KB, Max: {row['max_size']} bytes")
-            click.echo(f"   Total: {total_size_mb:.2f} MB, Requests: {row['count']}")
-
-
-# command to show potential attacks
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--limit', default=20, help='Number of results to display')
-def attacks(db: str, limit: int):
-    """Show potential attack patterns."""
-    with Database(db) as database:
-        queries = database.get_queries()
-        results = queries.get_potential_attacks(limit)
-        
-        if not results:
-            click.echo("No potential attacks found")
-            return
-            
-        click.echo(f"\nPotential Attack Attempts (Top {len(results)}):")
-        for i, row in enumerate(results, 1):
-            click.echo(f"{i}. Path: {row['request_path']}")
-            click.echo(f"   IP: {row['remote_addr']}, Attempts: {row['count']}")
-
-
-# command to export data for external analysis
-@cli.command()
-@click.option('--db', required=True, help='Path to SQLite database file')
-@click.option('--output', required=True, help='Path to output CSV file')
-@click.option('--query', type=click.Choice(['ips', 'paths', 'attacks', 'bots', 'status']), default='ips', 
-              help='Type of data to export')
-@click.option('--limit', default=1000, help='Maximum number of rows to export')
-def export(db: str, output: str, query: str, limit: int):
-    """Export data for analysis with external tools."""
-    import csv
+            except Exception as e:
+                console.print(f"[red]❌ {log_file.name} failed: {e}[/red]")
     
-    with Database(db) as database:
-        queries = database.get_queries()
+    # show summary
+    stats = processor.get_stats()
+    
+    # only show debug info in verbose mode
+    if verbose:
+        console.print("[dim]Refreshing database statistics...[/dim]")
+    
+    # determine summary style and message based on what actually happened
+    if total_processed == 0:
+        # nothing was processed ~ all files were skipped
+        summary_style = "yellow"
+        summary_icon = "⭐️"
+        summary_title = "Files Already Processed"
+        summary_message = f"""[yellow]{summary_icon} All files were already processed![/yellow]
         
-        # Get data based on query type
-        if query == 'ips':
-            results = queries.get_top_ips(limit=limit)
-        elif query == 'paths':
-            results = queries.get_top_paths(limit=limit)
-        elif query == 'attacks':
-            results = queries.get_potential_attacks(limit=limit)
-        elif query == 'bots':
-            results = queries.get_bot_activity(limit=limit)
-        elif query == 'status':
-            results = queries.get_status_distribution()
+        📊 processed: {total_processed:,} lines
+        💾 inserted: {total_inserted:,} entries  
+        🔍 total in db: {stats['total_logs']:,} entries
+        💽 database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)
+
+        [dim]💡 tip: use --force to reprocess files or check different log files[/dim]"""
+    
+    elif force and total_processed > 0:
+        # force mode was used ~ warn about potential duplicates
+        summary_style = "bright_yellow"
+        summary_icon = "⚠️"
+        summary_title = "Force Reprocessing Complete"
+        summary_message = f"""[bright_yellow]{summary_icon} Force reprocessing complete![/bright_yellow]
         
-        if not results:
-            click.echo("No data found to export")
-            return
+        📊 processed: {total_processed:,} lines
+        💾 inserted: {total_inserted:,} entries  
+        🔍 total in db: {stats['total_logs']:,} entries
+        💽 database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)
+
+        [bright_yellow]⚠️  warning: force mode may have created duplicate entries[/bright_yellow]
+        [dim]💡 tip: use 'nginx-sqlize clean --duplicates' to remove duplicates[/dim]"""
+            
+    else:
+        # normal successful processing
+        summary_style = "green"
+        summary_icon = "✨"
+        summary_title = "Processing Complete"
+        summary_message = f"""[green]{summary_icon} Ingestion complete![/green]
         
-        # Write to CSV
-        with open(output, 'w', newline='') as f:
-            if results:
-                writer = csv.DictWriter(f, fieldnames=results[0].keys())
-                writer.writeheader()
-                writer.writerows(results)
-                click.echo(f"Exported {len(results)} rows to {output}")
+        📊 processed: {total_processed:,} lines
+        💾 inserted: {total_inserted:,} entries  
+        🔍 total in db: {stats['total_logs']:,} entries
+        💽 database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)"""
+    
+    summary_panel = Panel.fit(
+        summary_message,
+        title=summary_title,
+        border_style=summary_style
+    )
+    
+    console.print(summary_panel)
+
+# ========================= commands ~ data querying =========================
+@app.command()
+def query(
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path(s) ~ single file, pattern, or comma-separated list"),
+    top_ips: Optional[int] = typer.Option(None, "--top-ips", help="Show top N IP addresses"),
+    top_paths: Optional[int] = typer.Option(None, "--top-paths", help="Show top N paths"),
+    status_codes: bool = typer.Option(False, "--status-codes", help="Show status distribution"),
+    methods: bool = typer.Option(False, "--methods", help="Show HTTP method distribution"),
+    referrers: Optional[int] = typer.Option(None, "--referrers", help="Show top N referrers"),
+    response_sizes: Optional[int] = typer.Option(None, "--response-sizes", help="Show paths with largest response sizes"),
+    traffic: Optional[str] = typer.Option(None, "--traffic", help="Show traffic patterns (hour/day)"),
+    errors: bool = typer.Option(False, "--errors", help="Show error analysis"),
+    bots: Optional[int] = typer.Option(None, "--bots", help="Show bot activity"),
+    attacks: Optional[int] = typer.Option(None, "--attacks", help="Show potential attacks"),
+    export: Optional[str] = typer.Option(None, "--export", help="Export to JSON file"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Result limit"),
+    combine: bool = typer.Option(False, "--combine", help="Combine results from multiple databases")
+) -> None:
+    """
+    Query nginx logs with smart analytics.
+    
+    Examples:
+      nginx-sqlize query --top-paths 10
+      nginx-sqlize query --top-ips 20
+      nginx-sqlize query --traffic hour
+      nginx-sqlize query --attacks 15
+    """
+    
+    # resolve database files
+    db_files = _resolve_database_files(db)
+    
+    if len(db_files) == 1:
+        # single database ~ normal operation
+        _query_single_database(
+            db_files[0], top_paths, top_ips, status_codes, methods, 
+            referrers, response_sizes, traffic, errors, bots, attacks, 
+            export, limit
+        )
+    else:
+        # multiple databases
+        if combine:
+            _query_multiple_databases_combined(
+                db_files, top_paths, top_ips, status_codes, 
+                methods, referrers, response_sizes, traffic, errors, 
+                bots, attacks, export, limit
+            )
+        else:
+            _query_multiple_databases_separate(
+                db_files, top_paths, top_ips, status_codes, 
+                methods, referrers, response_sizes, traffic, errors, 
+                bots, attacks, export, limit
+            )
 
 
-if __name__ == '__main__':
-    cli()
+# ========================= commands ~ management =========================
+@app.command()
+def status(
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path (auto-detects if not specified)")
+) -> None:
+    """
+    Show database status and statistics.
+    
+    Displays comprehensive information about processed files,
+    log counts, date ranges, and database health.
+    """
+    
+    # auto-detect database if not specified
+    db_path = _auto_detect_database(db)
+    
+    if not Path(db_path).exists():
+        console.print(f"[red]❌ database not found: {db_path}[/red]")
+        _suggest_available_databases()
+        raise typer.Exit(1)
+    
+    processor = create_processor(db_path=db_path)
+    stats = processor.get_stats()
+    
+    # create status display
+    status_content = f"""
+[bold cyan]📊 database statistics[/bold cyan]
+
+📁 database path: {db_path}
+💽 file size: {stats['database_size_mb']:.1f} mb
+🔍 total log entries: {stats['total_logs']:,}
+📂 processed files: {stats['processed_files']}
+
+[bold cyan]📅 date range[/bold cyan]
+{_format_date_range(stats.get('date_range', {}))}
+
+[bold cyan]🚦 top status codes[/bold cyan]
+{_format_status_codes(stats.get('top_status_codes', []))}
+"""
+            
+    console.print(Panel(status_content, title="nginx-sqlize status", border_style="blue"))
+
+@app.command()
+def clean(
+    db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path (auto-detects if not specified)"),
+    vacuum: bool = typer.Option(True, "--vacuum", help="Vacuum database after cleaning"),
+    older_than: Optional[str] = typer.Option(None, "--older-than", help="Remove logs older than (e.g., '30d', '1y')"),
+    duplicates: bool = typer.Option(False, "--duplicates", help="Remove duplicate log entries"),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+) -> None:
+    """
+    Clean and optimize database.
+    
+    Removes old logs, duplicates, and optimizes database
+    for better performance and reduced size.
+    """
+    
+    # auto-detect database if not specified
+    db_path = _auto_detect_database(db)
+    
+    if not Path(db_path).exists():
+        console.print(f"[red]❌ Database not found: {db_path}[/red]")
+        _suggest_available_databases()
+        raise typer.Exit(1)
+    
+    if not confirm:
+        operations = []
+        if older_than:
+            operations.append(f"Delete logs older than {older_than}")
+        if duplicates:
+            operations.append("Remove duplicate entries")
+        if vacuum:
+            operations.append("Vacuum/optimize database")
+        
+        if operations:
+            op_list = ", ".join(operations)
+            confirm = typer.confirm(f"this will {op_list}. continue?")
+            if not confirm:
+                console.print("[yellow]Operation cancelled[/yellow]")
+                return
+    
+    query_engine = QueryEngine(db_path)
+    
+    with console.status("[bold green]Cleaning database...") as status:
+        # check for duplicates first
+        if duplicates:
+            status.update("[bold green]Checking for duplicates...")
+            duplicate_count = query_engine.detect_duplicates()
+            if duplicate_count > 0:
+                console.print(f"[yellow]📋 Found {duplicate_count:,} duplicate entries[/yellow]")
+                deleted = query_engine.remove_duplicates()
+                console.print(f"[green]🗑️  Removed {deleted:,} duplicate entries[/green]")
+            else:
+                console.print("[green]✅ No duplicates found[/green]")
+        
+        # remove old logs if specified
+        if older_than:
+            status.update(f"[bold green]Removing logs older than {older_than}...")
+            deleted = query_engine.delete_old_logs(older_than)
+            console.print(f"[green]🗑️  Deleted {deleted:,} old log entries[/green]")
+        
+        # vacuum database if requested
+        if vacuum:
+            status.update("[bold green]Optimizing database...")
+            query_engine.vacuum()
+            console.print("[green]✨ Database optimized[/green]")
+    
+    # show new statistics
+    processor = create_processor(db_path=db_path)
+    stats = processor.get_stats()
+    
+    console.print(f"[green]✅ Cleanup complete! database now {stats['database_size_mb']:.1f} mb[/green]")
+
+
+# ========================= database file resolution helpers =========================
+def _resolve_database_files(db_arg: Optional[str]) -> List[str]:
+    """Resolve database file specification to list of actual files."""
+    if not db_arg:
+        # auto-detect single database
+        return [_auto_detect_database(None)]
+    
+    db_files = []
+    
+    # handle comma-separated list
+    if ',' in db_arg:
+        for db_path in db_arg.split(','):
+            db_path = db_path.strip()
+            if not Path(db_path).exists():
+                console.print(f"[red]❌ Database not found: {db_path}[/red]")
+                raise typer.Exit(1)
+            db_files.append(db_path)
+    
+    # handle glob pattern
+    elif '*' in db_arg or '?' in db_arg:
+        matched_files = list(Path.cwd().glob(db_arg))
+        db_files = [str(f) for f in matched_files if f.suffix in ['.sqlite', '.db']]
+        
+        if not db_files:
+            console.print(f"[red]❌ No database files match pattern: {db_arg}[/red]")
+            raise typer.Exit(1)
+    
+    # single file
+    else:
+        if not Path(db_arg).exists():
+            console.print(f"[red]❌ Database not found: {db_arg}[/red]")
+            _suggest_available_databases()
+            raise typer.Exit(1)
+        db_files = [db_arg]
+    
+    return db_files
+
+def _auto_detect_database(db_path: Optional[str]) -> str:
+    """
+    Auto-detect database file only when unambiguous.
+    
+    Rules:
+    1. if db_path specified, use it
+    2. if exactly one database file exists, use it
+    3. otherwise, require explicit specification
+    """
+    if db_path:
+        return db_path
+    
+    # look for database files in current directory
+    current_dir = Path.cwd()
+    
+    db_files = [
+        *current_dir.glob("*.sqlite"),
+        *current_dir.glob("*.db"),
+    ]
+    
+    if len(db_files) == 1:
+        # exactly one database file ~ safe to auto-detect
+        console.print(f"[dim]Auto-detected: {db_files[0].name}[/dim]")
+        return str(db_files[0])
+    elif len(db_files) == 0:
+        # no database files found
+        console.print("[red]❌ No database files found[/red]")
+        console.print("[dim]Tip: run 'nginx-sqlize ingest <logfile>' first to create a database[/dim]")
+        raise typer.Exit(1)
+    else:
+        # multiple database files ~ require explicit specification
+        console.print(f"[red]❌ Multiple database files found ({len(db_files)}), please specify one:[/red]")
+        for db_file in sorted(db_files):
+            size_mb = db_file.stat().st_size / (1024 * 1024)
+            console.print(f"  • {db_file.name} ({size_mb:.1f} mb)")
+        console.print("[dim]Tip: use --db <filename> to specify which database to use[/dim]")
+        raise typer.Exit(1)
+
+def _suggest_available_databases() -> None:
+    """Suggest available database files in current directory."""
+    current_dir = Path.cwd()
+    db_files = list(current_dir.glob("*.sqlite")) + list(current_dir.glob("*.db"))
+    
+    if db_files:
+        console.print("[yellow]🔍 Available databases in current directory:[/yellow]")
+        for db_file in sorted(db_files):
+            size_mb = db_file.stat().st_size / (1024 * 1024)
+            console.print(f"  • {db_file.name} ({size_mb:.1f} mb)")
+        console.print("[dim]Tip: use --db <filename> to specify a database[/dim]")
+    else:
+        console.print("[dim]Tip: run 'nginx-sqlize ingest <logfile>' first to create a database[/dim]")
+
+
+# ========================= query handlers =========================
+def _query_single_database(
+    db_path: str, top_paths: Optional[int], 
+    top_ips: Optional[int], status_codes: bool, methods: bool,
+    referrers: Optional[int], response_sizes: Optional[int], 
+    traffic: Optional[str], errors: bool, bots: Optional[int], 
+    attacks: Optional[int], export: Optional[str], limit: int
+) -> None:
+    """Query a single database."""
+    query_engine = QueryEngine(db_path)
+    results = []
+    title = ""
+    display_limit = limit
+    
+    # execute queries based on flags
+    if top_paths:
+        results = query_engine.top_paths(top_paths)
+        title = f"Top {top_paths} Requested Paths"
+        display_limit = top_paths
+        
+    elif top_ips:
+        results = query_engine.top_ips(top_ips)
+        title = f"Top {top_ips} IP Addresses"
+        display_limit = top_ips
+        
+    elif status_codes:
+        results = query_engine.status_distribution()
+        title = "Status Code Distribution"
+        display_limit = len(results)
+        
+    elif methods:
+        results = query_engine.method_distribution()
+        title = "HTTP Method Distribution"
+        display_limit = len(results)
+        
+    elif referrers:
+        results = query_engine.top_referrers(referrers)
+        title = f"Top {referrers} Referrers"
+        display_limit = referrers
+        
+    elif response_sizes:
+        results = query_engine.generate_performance_metrics()
+        title = f"Top {response_sizes} Paths by Response Size"
+        display_limit = response_sizes
+        
+    elif traffic:
+        results = query_engine.traffic_analysis(traffic)
+        title = f"Traffic Analysis by {traffic.capitalize()}"
+        display_limit = limit
+        
+    elif bots:
+        results = query_engine.analyze_bot_activity(bots)
+        title = f"Top {bots} Bot Activity"
+        display_limit = bots
+        
+    elif attacks:
+        results = query_engine.detect_security_threats(attacks)
+        title = f"Top {attacks} Potential Attacks"
+        display_limit = attacks
+        
+    elif errors:
+        results = query_engine.error_analysis()
+        title = "Error Analysis"
+        display_limit = limit
+        
+    else:
+        # default: show overview
+        results = query_engine.overview()
+        title = "Database Overview"
+        display_limit = len(results)
+    
+    # display results
+    _display_query_results(results, title, export, display_limit, db_path)
+
+def _query_multiple_databases_separate(
+    db_files: List[str], top_paths: Optional[int], 
+    top_ips: Optional[int], status_codes: bool, methods: bool,
+    referrers: Optional[int], response_sizes: Optional[int], 
+    traffic: Optional[str], errors: bool, bots: Optional[int], 
+    attacks: Optional[int], export: Optional[str], limit: int
+) -> None:
+    """Query multiple databases separately."""
+    console.print(f"[bold blue]📊 querying {len(db_files)} databases separately[/bold blue]")
+    
+    for i, db_file in enumerate(db_files, 1):
+        console.print(f"\n[bold cyan]Database {i}/{len(db_files)}: {Path(db_file).name}[/bold cyan]")
+        
+        try:
+            _query_single_database(
+                db_file, top_paths, top_ips, status_codes, methods, 
+                referrers, response_sizes, traffic, errors, bots, attacks, 
+                None, limit
+            )
+        except Exception as e:
+            console.print(f"[red]❌ Error querying {db_file}: {e}[/red]")
+
+def _query_multiple_databases_combined(
+    db_files: List[str], top_paths: Optional[int], 
+    top_ips: Optional[int], status_codes: bool, methods: bool,
+    referrers: Optional[int], response_sizes: Optional[int], 
+    traffic: Optional[str], errors: bool, bots: Optional[int], 
+    attacks: Optional[int], export: Optional[str], limit: int
+) -> None:
+    """Query multiple databases and combine results."""
+    console.print(f"[bold blue]📊 Combining results from {len(db_files)} databases[/bold blue]")
+    
+    combined_results = []
+    title = ""
+    
+    for db_file in db_files:
+        try:
+            query_engine = QueryEngine(db_file)
+            
+            # execute same query on each database
+            if top_paths:
+                results = query_engine.top_paths(top_paths * len(db_files))
+                title = f"Combined Top Paths"
+            elif top_ips:
+                results = query_engine.top_ips(top_ips * len(db_files))
+                title = f"Combined Top IP Addresses"
+            elif status_codes:
+                results = query_engine.status_distribution()
+                title = "Combined Status Distribution"
+            elif methods:
+                results = query_engine.method_distribution()
+                title = "Combined Method Distribution"
+            elif referrers:
+                results = query_engine.top_referrers(referrers * len(db_files))
+                title = f"Combined Top Referrers"
+            elif response_sizes:
+                results = query_engine.generate_performance_metrics()
+                title = "Combined Response Size Analysis"
+            elif traffic:
+                results = query_engine.traffic_analysis(traffic)
+                title = f"Combined Traffic Analysis"
+            elif errors:
+                results = query_engine.error_analysis()
+                title = "Combined Error Analysis"
+            elif bots:
+                results = query_engine.analyze_bot_activity(bots * len(db_files))
+                title = "Combined Bot Activity"
+            elif attacks:
+                results = query_engine.detect_security_threats(attacks * len(db_files))
+                title = "Combined Attack Analysis"
+            else:
+                results = query_engine.overview()
+                title = "Combined Database Overview"
+            
+            # add database source to each result
+            for result in results:
+                result['_source_db'] = Path(db_file).name
+            
+            combined_results.extend(results)
+            
+        except Exception as e:
+            console.print(f"[yellow]⚠️  Skipping {db_file}: {e}[/yellow]")
+    
+    if not combined_results:
+        console.print("[red]❌ No results from any database[/red]")
+        return
+    
+    # sort and limit combined results (basic aggregation)
+    if top_paths and 'requests' in (combined_results[0] if combined_results else {}):
+        # aggregate by path
+        from collections import defaultdict
+        path_totals = defaultdict(int)
+        for result in combined_results:
+            path_totals[result['request_path']] += result.get('requests', 0)
+        
+        combined_results = [
+            {'request_path': path, 'requests': count, '_source_db': 'combined'}
+            for path, count in sorted(path_totals.items(), key=lambda x: x[1], reverse=True)
+        ]
+    
+    _display_query_results(combined_results, title, export, limit)
+
+
+# ========================= display and formatting helpers =========================
+def _display_query_results(
+    results: List[Dict[str, Any]], title: str, export: Optional[str], 
+    limit: int, db_name: Optional[str] = None
+) -> None:
+    """Display query results in a formatted table."""
+    if not results:
+        console.print("[yellow]⚠️. No results found[/yellow]")
+        return
+    
+    # export if requested
+    if export:
+        with open(export, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+        console.print(f"[green]💾 Exported to {export}[/green]")
+    
+    # create table
+    table_title = title
+    if db_name:
+        table_title += f" - {Path(db_name).name}"
+    
+    table = Table(title=table_title, show_header=True, header_style="bold magenta")
+    
+    # add columns from first result
+    for key in results[0].keys():
+        if key.startswith('_'):  # skip internal fields
+            continue
+        table.add_column(key.replace('_', ' ').title())
+    
+    # add rows with proper formatting
+    for row in results[:limit]:
+        formatted_row = []
+        for key, value in row.items():
+            if key.startswith('_'):  # skip internal fields
+                continue
+            
+            # special formatting for status codes
+            if key == 'status' and isinstance(value, int):
+                if value < 300:
+                    formatted_value = f"[green]{value}[/green]"
+                elif value < 400:
+                    formatted_value = f"[blue]{value}[/blue]"
+                elif value < 500:
+                    formatted_value = f"[yellow]{value}[/yellow]"
+                else:
+                    formatted_value = f"[red]{value}[/red]"
+                formatted_row.append(formatted_value)
+            elif isinstance(value, (int, float)) and value > 1000:
+                formatted_row.append(f"{value:,}")
+            else:
+                formatted_row.append(str(value))
+        table.add_row(*formatted_row)
+    
+    console.print(table)
+
+def _format_date_range(date_range: Dict[str, Any]) -> str:
+    """Format date range for display."""
+    if not date_range or not date_range.get('earliest'):
+        return "[dim]No data available[/dim]"
+    
+    return f"Earliest: {date_range['earliest']}\nLatest: {date_range['latest']}"
+
+def _format_status_codes(status_codes: List[Dict[str, Any]]) -> str:
+    """Format status codes for display."""
+    if not status_codes:
+        return "[dim]No data available[/dim]"
+    
+    lines = []
+    for item in status_codes:
+        status = item['status']
+        count = item['count']
+        
+        # color code by status type
+        if status < 300:
+            color = "green"
+        elif status < 400:
+            color = "blue"
+        elif status < 500:
+            color = "yellow"
+        else:
+            color = "red"
+        
+        lines.append(f"[{color}]{status}[/{color}]: {count:,}")
+    
+    return "\n".join(lines)
+
+
+# ========================= path and file validation =========================
+def _determine_database_path(logs: str, db: Optional[str], output: Optional[str], verbose: bool = False) -> str:
+    """
+    Determine the database path using smart defaults.
+    
+    Priority order:
+    1. explicit --db path (full path with extension)
+    2. --output name (adds .sqlite extension)
+    3. auto-generated from first log file name
+    """
+    
+    # if explicit db path provided, use it as-is
+    if db:
+        if verbose:
+            console.print(f"[dim]Using explicit database path: {db}[/dim]")
+        return db
+    
+    # if output name provided, add .sqlite extension
+    if output:
+        db_path = f"{output}.sqlite"
+        if verbose:
+            console.print(f"[dim]Using output name: {output} -> {db_path}[/dim]")
+        return db_path
+    
+    # auto-generate from log file pattern
+    try:
+        # find the first log file to base the name on
+        log_path = Path(logs)
+        
+        if log_path.is_file():
+            # single file ~ use its name
+            base_name = log_path.stem
+            if base_name.endswith('.log'):
+                base_name = base_name[:-4]  # remove .log if present
+        else:
+            # pattern ~ try to extract a meaningful name
+            if '*' in logs:
+                # extract directory and pattern
+                parent = log_path.parent
+                pattern = log_path.name
+                
+                # find actual files
+                found_files = list(parent.glob(pattern))
+                if found_files:
+                    # use first file's name
+                    base_name = found_files[0].stem
+                    if base_name.endswith('.log'):
+                        base_name = base_name[:-4]
+                else:
+                    # fallback to pattern-based name
+                    base_name = pattern.replace('*', '').replace('.log', '') or 'nginx_logs'
+            else:
+                # fallback
+                base_name = 'nginx_logs'
+        
+        # ensure we have a valid name
+        if not base_name or base_name in ['.', '..']:
+            base_name = 'nginx_logs'
+        
+        db_path = f"{base_name}.sqlite"
+        
+        if verbose:
+            console.print(f"[dim]Auto-generated database name: {db_path}[/dim]")
+        
+        return db_path
+        
+    except Exception as e:
+        if verbose:
+            console.print(f"[dim]Failed to auto-generate name ({e}), using default[/dim]")
+        return "nginx_logs.sqlite"
+
+def _validate_db_path(db_path: str) -> str:
+    """Validate database path for safety."""
+    path = Path(db_path).resolve()
+    
+    # prevent writing to system directories
+    system_dirs = ['/etc', '/sys', '/proc', '/dev', '/boot', '/bin', '/sbin', '/usr/bin', '/usr/sbin']
+    
+    for sys_dir in system_dirs:
+        if str(path).startswith(sys_dir):
+            console.print(f"[red]❌ Cannot create database in system directory: {sys_dir}[/red]")
+            raise typer.Exit(1)
+    
+    # ensure proper extension
+    if path.suffix not in ['.sqlite', '.db', '.sqlite3']:
+        path = path.with_suffix('.sqlite')
+    
+    return str(path)
+
+
+# ========================= main entry point =========================
+def main() -> None:
+    """Entry point for the cli application."""
+    app()
+
+if __name__ == "__main__":
+    main()
