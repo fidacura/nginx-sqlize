@@ -4,16 +4,24 @@ A tool for importing Nginx logs into SQLite for easy querying and analysis.
 
 ## ⚡ Quick Start
 
-### Installation
+### Installation from PyPI
 
 ```bash
-# install from source
+pip install nginx-sqlize
+```
+
+### Installation from Source
+
+```bash
 git clone https://github.com/fidacura/nginx-sqlize.git
 cd nginx-sqlize
-pip install -e .
 
-# or install from pypi (when published)
-pip install nginx-sqlize
+# create virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
+
+# install in development mode
+pip install -e .
 ```
 
 ### Basic Usage
@@ -36,33 +44,50 @@ nginx-sqlize clean --duplicates --vacuum
 
 ## 📋 Command Reference
 
-| Category          | Command                       | Description                             | Example                                                       |
-| ----------------- | ----------------------------- | --------------------------------------- | ------------------------------------------------------------- |
-| **📥 Ingestion**  | `ingest <logs>`               | Process nginx logs into SQLite database | `nginx-sqlize ingest /var/log/nginx/*.log`                    |
-|                   | `ingest --output <name>`      | Specify custom database name            | `nginx-sqlize ingest logs/ --output mysite`                   |
-|                   | `ingest --force`              | Reprocess all files (ignore tracking)   | `nginx-sqlize ingest logs/ --force`                           |
-|                   | `ingest --verbose`            | Show detailed processing information    | `nginx-sqlize ingest logs/ --verbose`                         |
-|                   | `ingest --batch-size <n>`     | Set processing batch size               | `nginx-sqlize ingest logs/ --batch-size 5000`                 |
-| **🔍 Analytics**  | `query --top-paths <n>`       | Most requested paths                    | `nginx-sqlize query --top-paths 20`                           |
-|                   | `query --top-ips <n>`         | Most active IP addresses                | `nginx-sqlize query --top-ips 15`                             |
-|                   | `query --status-codes`        | HTTP status distribution                | `nginx-sqlize query --status-codes`                           |
-|                   | `query --methods`             | HTTP method distribution                | `nginx-sqlize query --methods`                                |
-|                   | `query --referrers <n>`       | Top referrer sources                    | `nginx-sqlize query --referrers 10`                           |
-|                   | `query --response-sizes <n>`  | Paths by response size                  | `nginx-sqlize query --response-sizes 15`                      |
-|                   | `query --traffic <period>`    | Traffic patterns (hour/day)             | `nginx-sqlize query --traffic hour`                           |
-|                   | `query --errors`              | Error analysis and patterns             | `nginx-sqlize query --errors`                                 |
-|                   | `query --bots <n>`            | Bot activity detection                  | `nginx-sqlize query --bots 10`                                |
-|                   | `query --attacks <n>`         | Potential attack patterns               | `nginx-sqlize query --attacks 20`                             |
-| **💾 Database**   | `query --sql <query>`         | Execute custom SQL query                | `nginx-sqlize query --sql "SELECT * FROM logs LIMIT 10"`      |
-|                   | `query --export <file>`       | Export results to JSON                  | `nginx-sqlize query --top-paths 50 --export report.json`      |
-|                   | `query --combine`             | Combine multiple database results       | `nginx-sqlize query --db "*.sqlite" --combine --status-codes` |
-|                   | `query --limit <n>`           | Limit number of results                 | `nginx-sqlize query --top-paths 5 --limit 5`                  |
-| **📊 Management** | `status`                      | Show database statistics                | `nginx-sqlize status`                                         |
-|                   | `status --db <path>`          | Status for specific database            | `nginx-sqlize status --db mysite.sqlite`                      |
-|                   | `clean --duplicates`          | Remove duplicate entries                | `nginx-sqlize clean --duplicates`                             |
-|                   | `clean --vacuum`              | Optimize database storage               | `nginx-sqlize clean --vacuum`                                 |
-|                   | `clean --older-than <period>` | Remove old logs                         | `nginx-sqlize clean --older-than 30d`                         |
-|                   | `clean --yes`                 | Skip confirmation prompts               | `nginx-sqlize clean --duplicates --yes`                       |
+### **📥 Ingestion**
+
+| Command                   | Description                             | Example                                       |
+| ------------------------- | --------------------------------------- | --------------------------------------------- |
+| `ingest <logs>`           | Process nginx logs into SQLite database | `nginx-sqlize ingest /var/log/nginx/*.log`    |
+| `ingest --output <name>`  | Specify custom database name            | `nginx-sqlize ingest logs/ --output mysite`   |
+| `ingest --force`          | Reprocess all files (ignore tracking)   | `nginx-sqlize ingest logs/ --force`           |
+| `ingest --verbose`        | Show detailed processing information    | `nginx-sqlize ingest logs/ --verbose`         |
+| `ingest --batch-size <n>` | Set processing batch size               | `nginx-sqlize ingest logs/ --batch-size 5000` |
+
+### **🔍 Analytics**
+
+| Command                      | Description                 | Example                                  |
+| ---------------------------- | --------------------------- | ---------------------------------------- |
+| `query --top-paths <n>`      | Most requested paths        | `nginx-sqlize query --top-paths 20`      |
+| `query --top-ips <n>`        | Most active IP addresses    | `nginx-sqlize query --top-ips 15`        |
+| `query --status-codes`       | HTTP status distribution    | `nginx-sqlize query --status-codes`      |
+| `query --methods`            | HTTP method distribution    | `nginx-sqlize query --methods`           |
+| `query --referrers <n>`      | Top referrer sources        | `nginx-sqlize query --referrers 10`      |
+| `query --response-sizes <n>` | Paths by response size      | `nginx-sqlize query --response-sizes 15` |
+| `query --traffic <period>`   | Traffic patterns (hour/day) | `nginx-sqlize query --traffic hour`      |
+| `query --errors`             | Error analysis and patterns | `nginx-sqlize query --errors`            |
+| `query --bots <n>`           | Bot activity detection      | `nginx-sqlize query --bots 10`           |
+| `query --attacks <n>`        | Potential attack patterns   | `nginx-sqlize query --attacks 20`        |
+
+### **💾 Database**
+
+| Command                 | Description                       | Example                                                       |
+| ----------------------- | --------------------------------- | ------------------------------------------------------------- |
+| `query --sql <query>`   | Execute custom SQL query          | `nginx-sqlize query --sql "SELECT * FROM logs LIMIT 10"`      |
+| `query --export <file>` | Export results to JSON            | `nginx-sqlize query --top-paths 50 --export report.json`      |
+| `query --combine`       | Combine multiple database results | `nginx-sqlize query --db "*.sqlite" --combine --status-codes` |
+| `query --limit <n>`     | Limit number of results           | `nginx-sqlize query --top-paths 5 --limit 5`                  |
+
+### **📊 Management**
+
+| Command                       | Description                  | Example                                  |
+| ----------------------------- | ---------------------------- | ---------------------------------------- |
+| `status`                      | Show database statistics     | `nginx-sqlize status`                    |
+| `status --db <path>`          | Status for specific database | `nginx-sqlize status --db mysite.sqlite` |
+| `clean --duplicates`          | Remove duplicate entries     | `nginx-sqlize clean --duplicates`        |
+| `clean --vacuum`              | Optimize database storage    | `nginx-sqlize clean --vacuum`            |
+| `clean --older-than <period>` | Remove old logs              | `nginx-sqlize clean --older-than 30d`    |
+| `clean --yes`                 | Skip confirmation prompts    | `nginx-sqlize clean --duplicates --yes`  |
 
 ### 🎯 Common Workflows
 

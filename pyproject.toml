@@ -4,20 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nginx-sqlize"
-version = "0.2.0"
+version = "0.2.1"
 description = "A tool for importing Nginx logs into SQLite for easy querying."
-readme = "README.md"
-license = "MIT"
+license = "GPL-2.0-only"
 requires-python = ">=3.9"
 authors = [
-    {name = "fidacura", email = "your-email@example.com"}
+    {name = "fidacura", email = "hey@fidacura.net"}
 ]
 keywords = ["nginx", "logs", "sqlite", "analytics", "cli"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
