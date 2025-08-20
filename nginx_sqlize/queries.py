@@ -1,5 +1,5 @@
 """
-nginx-sqlize query interface.
+nginx-sqlize query interface with sql injection protection.
 """
 
 import sqlite3
@@ -11,6 +11,12 @@ import re
 
 from loguru import logger
 
+try:
+    from .core import translate_error_message
+except ImportError:
+    # fallback for direct execution
+    from core import translate_error_message
+
 # optional polars import
 try:
     import polars as pl
@@ -21,15 +27,12 @@ except ImportError:
 
 class QueryEngine:
     """
-    Query engine for nginx log analytics.
-    
-    Provides high-level query interface with optimized sql patterns
-    and polars integration for complex analytics operations.
+    Secure query engine for nginx log analytics;
+    all methods use parameterised queries and input validation.
     """
     
-    # ========================= initialization and connection management =========================
     def __init__(self, db_path: str):
-        """initialize query engine with database connection."""
+        """initialise query engine with database connection."""
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {db_path}")
@@ -44,33 +47,29 @@ class QueryEngine:
         finally:
             conn.close()
     
-    # ========================= query execution helpers =========================
     def _execute_query(self, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
-        """Execute query and return results as list of dictionaries."""
+        """
+        Execute parameterised query with injection protection.
+        
+        uses ? placeholders instead of string formatting to prevent
+        injection attacks. all queries in this class are static sql
+        with proper parameterization for user inputs.
+        """
         try:
             with self._connection() as conn:
                 cursor = conn.execute(query, params)
                 return [dict(row) for row in cursor.fetchall()]
+                
         except sqlite3.Error as e:
-            logger.error(f"Query failed: {e}")
+            error_msg = translate_error_message(e, str(self.db_path))
+            logger.error(f"Database query failed: {error_msg}")
             return []
     
-    def _execute_polars_query(self, query: str) -> pl.DataFrame:
-        """Execute query and return polars dataframe for advanced analytics."""
-        if not HAS_POLARS:
-            logger.warning("Polars not available, returning empty dataframe")
-            return None
-        
-        try:
-            with self._connection() as conn:
-                return pl.read_database(query, conn)
-        except Exception as e:
-            logger.error(f"Polars query failed: {e}")
-            return pl.DataFrame()
-    
     # ========================= basic overview and statistics =========================
+    
     def overview(self) -> List[Dict[str, Any]]:
-        """Get database overview with key metrics."""
+        """Get database overview with key metrics using secure parameterised queries."""
+        # completely static query ~ no user input, no injection risk
         query = """
             WITH stats AS (
                 SELECT 
@@ -97,11 +96,11 @@ class QueryEngine:
             SELECT 'avg response size', printf('%.1f kb', avg_response_size/1024) FROM stats
             UNION ALL
             SELECT 'error rate', printf('%.2f%%', error_rate) FROM stats
-            """
+        """
         return self._execute_query(query)
     
     def status_distribution(self) -> List[Dict[str, Any]]:
-        """Get http status code distribution with categories."""
+        """Get http status code distribution ~ static query."""
         query = """
         SELECT 
             status,
@@ -120,7 +119,7 @@ class QueryEngine:
         return self._execute_query(query)
     
     def method_distribution(self) -> List[Dict[str, Any]]:
-        """Get distribution of HTTP request methods."""
+        """Get distribution of http request methods ~ static query."""
         query = """
         SELECT 
             request_method,
@@ -134,8 +133,16 @@ class QueryEngine:
         return self._execute_query(query)
     
     # ========================= traffic and visitor analysis =========================
+    
     def top_ips(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get most active IP addresses."""
+        """
+        Get most active ip addresses using parameterised limit;
+        validates limit parameter and uses ? placeholder to prevent injection.
+        """
+        # validate limit is reasonable integer
+        if not isinstance(limit, int) or limit <= 0 or limit > 10000:
+            raise ValueError(f"Invalid limit: {limit}. must be 1-10000")
+        
         query = """
         SELECT 
             remote_addr,
@@ -159,7 +166,11 @@ class QueryEngine:
         return self._execute_query(query, (limit,))
 
     def top_paths(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get most requested paths with request counts."""
+        """Get most requested paths using secure parameterised query."""
+        # validate limit parameter
+        if not isinstance(limit, int) or limit <= 0 or limit > 10000:
+            raise ValueError(f"Invalid limit: {limit}. must be 1-10000")
+        
         query = """
         SELECT 
             request_path,
@@ -176,7 +187,10 @@ class QueryEngine:
         return self._execute_query(query, (limit,))
     
     def top_referrers(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get top referrers excluding direct traffic."""
+        """Get top referrers using parameterised query."""
+        if not isinstance(limit, int) or limit <= 0 or limit > 10000:
+            raise ValueError(f"Invalid limit: {limit}. must be 1-10000")
+        
         query = """
         SELECT 
             referer,
@@ -192,16 +206,22 @@ class QueryEngine:
         return self._execute_query(query, (limit,))
     
     def traffic_analysis(self, time_period: str = 'hour') -> List[Dict[str, Any]]:
-        """Analyze traffic patterns with peak detection."""
-        time_format = {
-            'hour': "substr(timestamp, 1, 15)",
-            'day': "substr(timestamp, 1, 11)"
-        }.get(time_period, "substr(timestamp, 1, 15)")
+        """
+        Analyse traffic patterns with injection protection.
+        """
+        # whitelist prevents injection ~ only these exact values allowed
+        allowed_periods = {'hour': 15, 'day': 11}
+        if time_period not in allowed_periods:
+            raise ValueError(f"Invalid time_period: {time_period}. allowed: hour, day")
         
-        query = f"""
+        # get the substring length for this period (safe integer)
+        substr_length = allowed_periods[time_period]
+        
+        # parameterised query prevents all injection attempts
+        query = """
         WITH traffic_data AS (
             SELECT 
-                {time_format} as time_period,
+                substr(timestamp, 1, ?) as time_period,
                 COUNT(*) as requests,
                 COUNT(DISTINCT remote_addr) as unique_visitors,
                 SUM(bytes_sent) as total_bytes,
@@ -231,11 +251,16 @@ class QueryEngine:
         ORDER BY td.time_period DESC
         LIMIT 100
         """
-        return self._execute_query(query)
+        return self._execute_query(query, (substr_length,))
     
     # ========================= security and threat analysis =========================
-    def analyze_bot_activity(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Identify bot activity with simple behavioral analysis."""
+    
+    def analyse_bot_activity(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Identify bot activity using secure parameterised queries."""
+        if not isinstance(limit, int) or limit <= 0 or limit > 10000:
+            raise ValueError(f"Invalid limit: {limit}. must be 1-10000")
+        
+        # static query with parameterised limit ~ no injection risk
         query = """
         SELECT 
             user_agent,
@@ -264,7 +289,11 @@ class QueryEngine:
         return self._execute_query(query, (limit,))
     
     def detect_security_threats(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Detect potential attack patterns with simple threat classification."""
+        """Detect potential attack patterns using secure static queries."""
+        if not isinstance(limit, int) or limit <= 0 or limit > 10000:
+            raise ValueError(f"Invalid limit: {limit}. must be 1-10000")
+        
+        # completely static query ~ all patterns hardcoded, no user input
         query = """
         SELECT 
             request_path,
@@ -300,16 +329,19 @@ class QueryEngine:
         return self._execute_query(query, (limit,))
     
     # ========================= error and performance analysis =========================
+    
     def error_analysis(self, time_period: str = 'hour') -> List[Dict[str, Any]]:
-        """Analyze error patterns over time with detailed breakdown."""
-        time_format = {
-            'hour': "substr(timestamp, 1, 15)",
-            'day': "substr(timestamp, 1, 11)"
-        }.get(time_period, "substr(timestamp, 1, 15)")
+        """Analyse error patterns using secure time period validation."""
+        # whitelist validation prevents injection
+        allowed_periods = {'hour': 15, 'day': 11}
+        if time_period not in allowed_periods:
+            raise ValueError(f"Invalid time_period: {time_period}. allowed: hour, day")
         
-        query = f"""
+        substr_length = allowed_periods[time_period]
+        
+        query = """
         SELECT 
-            {time_format} as time_period,
+            substr(timestamp, 1, ?) as time_period,
             COUNT(*) as total_requests,
             SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END) as client_errors,
             SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) as server_errors,
@@ -323,10 +355,11 @@ class QueryEngine:
         ORDER BY time_period DESC
         LIMIT 50
         """
-        return self._execute_query(query)
+        return self._execute_query(query, (substr_length,))
     
     def generate_performance_metrics(self) -> List[Dict[str, Any]]:
-        """Calculate performance and efficiency metrics."""
+        """Calculate performance metrics using static secure query."""
+        # completely static query ~ no user input
         query = """
         WITH performance_data AS (
             SELECT 
@@ -362,28 +395,42 @@ class QueryEngine:
         return self._execute_query(query)
     
     # ========================= database maintenance operations =========================
+    
     def vacuum(self) -> bool:
-        """Optimize database by running vacuum operation."""
+        """Optimise database ~ static operations."""
         try:
             with self._connection() as conn:
                 conn.execute("VACUUM")
                 logger.info("Database vacuum completed successfully")
                 return True
         except sqlite3.Error as e:
-            logger.error(f"Vacuum operation failed: {e}")
+            error_msg = translate_error_message(e, str(self.db_path))
+            logger.error(f"Vacuum operation failed: {error_msg}")
             return False
     
     def delete_old_logs(self, older_than: str) -> int:
-        """Delete logs older than specified period (e.g., '30d', '1y')."""
-        # parse time period
-        match = re.match(r'(\d+)([dwmy])', older_than.lower())
+        """
+        Delete logs older than specified period using secure validation.
+        """
+        # validate time period format to prevent injection
+        match = re.match(r'^(\d+)([dwmy])$', older_than.lower())
         if not match:
             raise ValueError("Invalid time format. use format like '30d', '1y', etc.")
         
         amount, unit = match.groups()
         amount = int(amount)
         
-        # calculate cutoff date
+        # validate reasonable limits to prevent accidental mass deletion
+        if unit == 'd' and amount > 3650:  # max 10 years
+            raise ValueError("Time period too large")
+        elif unit == 'w' and amount > 520:  # max 10 years in weeks
+            raise ValueError("Time period too large")
+        elif unit == 'm' and amount > 120:  # max 10 years in months
+            raise ValueError("Time period too large")
+        elif unit == 'y' and amount > 10:  # max 10 years
+            raise ValueError("Time period too large")
+        
+        # calculate cutoff date safely
         now = datetime.now()
         
         if unit == 'd':
@@ -394,17 +441,13 @@ class QueryEngine:
             cutoff = now - timedelta(days=amount * 30)  # approximate
         elif unit == 'y':
             cutoff = now - timedelta(days=amount * 365)  # approximate
-        else:
-            raise ValueError(f"Unsupported time unit: {unit}")
         
         cutoff_str = cutoff.strftime("%d/%b/%Y")
         
         try:
             with self._connection() as conn:
-                cursor = conn.execute(
-                    "DELETE FROM logs WHERE timestamp < ?",
-                    (cutoff_str,)
-                )
+                # parameterised query prevents injection through cutoff date
+                cursor = conn.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff_str,))
                 deleted_count = cursor.rowcount
                 conn.commit()
                 logger.info(f"Deleted {deleted_count} log entries older than {older_than}")
@@ -414,10 +457,10 @@ class QueryEngine:
             return 0
     
     def detect_duplicates(self) -> int:
-        """Detect how many duplicate entries exist - faster method."""
+        """Detect duplicate entries using static secure query."""
         try:
             with self._connection() as conn:
-                # much faster: just check for exact duplicate timestamps and IPs
+                # static query ~ no user input, no injection risk
                 cursor = conn.execute("""
                     SELECT COUNT(*) as duplicates FROM (
                         SELECT timestamp, remote_addr, request_path, COUNT(*) as cnt
@@ -433,10 +476,10 @@ class QueryEngine:
             return 0
     
     def remove_duplicates(self) -> int:
-        """Remove duplicate log entries based on key fields."""
+        """Remove duplicate entries using static secure query."""
         try:
             with self._connection() as conn:
-                # find and delete duplicates, keeping the first occurrence
+                # static query for duplicate removal
                 cursor = conn.execute("""
                     DELETE FROM logs 
                     WHERE id NOT IN (
@@ -453,79 +496,3 @@ class QueryEngine:
         except sqlite3.Error as e:
             logger.error(f"Failed to remove duplicates: {e}")
             return 0
-    
-    # ========================= export and data output =========================
-    def export_to_csv(self, output_path: str, query_type: str = 'all', limit: int = 10000) -> bool:
-        """Export query results to csv file."""
-        if HAS_POLARS:
-            # use polars for performance if available
-            try:
-                if query_type == 'all':
-                    df = self._execute_polars_query(f"SELECT * FROM logs LIMIT {limit}")
-                elif query_type == 'errors':
-                    df = self._execute_polars_query(
-                        f"SELECT * FROM logs WHERE status >= 400 LIMIT {limit}"
-                    )
-                elif query_type == 'summary':
-                    df = self._execute_polars_query("""
-                        SELECT 
-                            substr(timestamp, 1, 11) as date,
-                            COUNT(*) as requests,
-                            COUNT(DISTINCT remote_addr) as unique_ips,
-                            SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) as errors
-                        FROM logs 
-                        GROUP BY date 
-                        ORDER BY date DESC
-                    """)
-                else:
-                    logger.error(f"Unsupported export type: {query_type}")
-                    return False
-                
-                df.write_csv(output_path)
-                logger.info(f"Exported {len(df)} rows to {output_path}")
-                return True
-                
-            except Exception as e:
-                logger.error(f"Export failed: {e}")
-                return False
-        else:
-            # fallback to manual csv writing
-            import csv
-            
-            try:
-                if query_type == 'all':
-                    query = f"SELECT * FROM logs LIMIT {limit}"
-                elif query_type == 'errors':
-                    query = f"SELECT * FROM logs WHERE status >= 400 LIMIT {limit}"
-                elif query_type == 'summary':
-                    query = """
-                        SELECT 
-                            substr(timestamp, 1, 11) as date,
-                            COUNT(*) as requests,
-                            COUNT(DISTINCT remote_addr) as unique_ips,
-                            SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) as errors
-                        FROM logs 
-                        GROUP BY date 
-                        ORDER BY date DESC
-                    """
-                else:
-                    logger.error(f"Unsupported export type: {query_type}")
-                    return False
-                
-                results = self._execute_query(query)
-                
-                if not results:
-                    logger.warning("No data to export")
-                    return False
-                
-                with open(output_path, 'w', newline='') as csvfile:
-                    writer = csv.DictWriter(csvfile, fieldnames=results[0].keys())
-                    writer.writeheader()
-                    writer.writerows(results)
-                
-                logger.info(f"Exported {len(results)} rows to {output_path}")
-                return True
-                
-            except Exception as e:
-                logger.error(f"Export failed: {e}")
-                return False

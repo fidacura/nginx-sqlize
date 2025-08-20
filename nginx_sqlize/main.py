@@ -15,11 +15,11 @@ from rich.panel import Panel
 from rich import print as rprint
 
 try:
-    from .core import create_processor
+    from .core import create_processor, translate_error_message, validate_positive_int
     from .queries import QueryEngine
 except ImportError:
     # fallback for direct execution
-    from core import create_processor
+    from core import create_processor, translate_error_message, validate_positive_int
     from queries import QueryEngine
 
 
@@ -33,6 +33,7 @@ app = typer.Typer(
 
 
 # ========================= commands ~ data ingestion =========================
+
 @app.command()
 def ingest(
     logs: str = typer.Argument(..., help="Log file pattern (e.g., /var/log/nginx/*.log)"),
@@ -44,13 +45,16 @@ def ingest(
 ) -> None:
     """
     Ingest nginx logs into sqlite database.
-    
+
     Automatically handles gzipped files, resumable processing, and
     provides real-time progress feedback with rich output.
     """
     
     if verbose:
         console.print("[dim]Initializing processor...[/dim]")
+    
+    # validate cli parameters to prevent crashes
+    validate_positive_int(batch_size, "batch_size", 100000)
     
     # smart database naming logic
     db_path = _determine_database_path(logs, db, output, verbose)
@@ -71,12 +75,12 @@ def ingest(
     log_files = processor.find_log_files(logs)
     
     if not log_files:
-        console.print(f"[red]❌ no log files found matching: {logs}[/red]")
+        console.print(f"[red]❌ No log files found matching: {logs}[/red]")
         raise typer.Exit(1)
     
     if verbose:
-        console.print(f"[green]🔍 found {len(log_files)} log files[/green]")
-        console.print(f"[dim]📄 database: {db_path}[/dim]")
+        console.print(f"[green]🔍 Found {len(log_files)} log files[/green]")
+        console.print(f"[dim]📄 Database: {db_path}[/dim]")
         
         # warn user about force mode
         if force:
@@ -99,7 +103,7 @@ def ingest(
         ) as progress:
             
             for log_file in log_files:
-                task = progress.add_task(f"processing {log_file.name}", total=None)
+                task = progress.add_task(f"Processing {log_file.name}", total=None)
                 
                 try:
                     result = processor.process_file(log_file, force=force)
@@ -118,8 +122,8 @@ def ingest(
                         )
                     
                 except Exception as e:
-                    progress.update(task, description=f"❌ {log_file.name} (failed)")
-                    console.print(f"[red]error: {e}[/red]")
+                    error_msg = translate_error_message(e, str(log_file))
+                    console.print(f"[red]❌ {log_file.name}: {error_msg}[/red]")
     
     else:
         # non-verbose mode: simple, clean output
@@ -135,7 +139,8 @@ def ingest(
                     console.print(f"[green]✅ {log_file.name} ({result['processed']:,} lines)[/green]")
                 
             except Exception as e:
-                console.print(f"[red]❌ {log_file.name} failed: {e}[/red]")
+                error_msg = translate_error_message(e, str(log_file))
+                console.print(f"[red]❌ {log_file.name}: {error_msg}[/red]")
     
     # show summary
     stats = processor.get_stats()
@@ -152,12 +157,12 @@ def ingest(
         summary_title = "Files Already Processed"
         summary_message = f"""[yellow]{summary_icon} All files were already processed![/yellow]
         
-        📊 processed: {total_processed:,} lines
-        💾 inserted: {total_inserted:,} entries  
-        🔍 total in db: {stats['total_logs']:,} entries
-        💽 database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)
+        📊 Processed: {total_processed:,} lines
+        💾 Inserted: {total_inserted:,} entries  
+        🔍 Total in db: {stats['total_logs']:,} entries
+        💽 Database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)
 
-        [dim]💡 tip: use --force to reprocess files or check different log files[/dim]"""
+        [dim]💡 Tip: use --force to reprocess files or check different log files[/dim]"""
     
     elif force and total_processed > 0:
         # force mode was used ~ warn about potential duplicates
@@ -166,13 +171,13 @@ def ingest(
         summary_title = "Force Reprocessing Complete"
         summary_message = f"""[bright_yellow]{summary_icon} Force reprocessing complete![/bright_yellow]
         
-        📊 processed: {total_processed:,} lines
-        💾 inserted: {total_inserted:,} entries  
-        🔍 total in db: {stats['total_logs']:,} entries
-        💽 database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)
+        📊 Processed: {total_processed:,} lines
+        💾 Inserted: {total_inserted:,} entries  
+        🔍 Total in db: {stats['total_logs']:,} entries
+        💽 Database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)
 
-        [bright_yellow]⚠️  warning: force mode may have created duplicate entries[/bright_yellow]
-        [dim]💡 tip: use 'nginx-sqlize clean --duplicates' to remove duplicates[/dim]"""
+        [bright_yellow]⚠️  Warning: force mode may have created duplicate entries[/bright_yellow]
+        [dim]💡 Tip: use 'nginx-sqlize clean --duplicates' to remove duplicates[/dim]"""
             
     else:
         # normal successful processing
@@ -181,10 +186,10 @@ def ingest(
         summary_title = "Processing Complete"
         summary_message = f"""[green]{summary_icon} Ingestion complete![/green]
         
-        📊 processed: {total_processed:,} lines
-        💾 inserted: {total_inserted:,} entries  
-        🔍 total in db: {stats['total_logs']:,} entries
-        💽 database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)"""
+        📊 Processed: {total_processed:,} lines
+        💾 Inserted: {total_inserted:,} entries  
+        🔍 Total in db: {stats['total_logs']:,} entries
+        💽 Database: [bold]{db_path}[/bold] ({stats['database_size_mb']:.1f} mb)"""
     
     summary_panel = Panel.fit(
         summary_message,
@@ -194,7 +199,9 @@ def ingest(
     
     console.print(summary_panel)
 
+
 # ========================= commands ~ data querying =========================
+
 @app.command()
 def query(
     db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path(s) ~ single file, pattern, or comma-separated list"),
@@ -215,12 +222,28 @@ def query(
     """
     Query nginx logs with smart analytics.
     
-    Examples:
+    examples:
       nginx-sqlize query --top-paths 10
       nginx-sqlize query --top-ips 20
       nginx-sqlize query --traffic hour
       nginx-sqlize query --attacks 15
     """
+    
+    # validate query parameters to prevent crashes
+    validate_positive_int(limit, "limit", 10000)
+    
+    if top_ips:
+        validate_positive_int(top_ips, "top_ips", 1000)
+    if top_paths:
+        validate_positive_int(top_paths, "top_paths", 1000)
+    if referrers:
+        validate_positive_int(referrers, "referrers", 1000)
+    if response_sizes:
+        validate_positive_int(response_sizes, "response_sizes", 1000)
+    if bots:
+        validate_positive_int(bots, "bots", 1000)
+    if attacks:
+        validate_positive_int(attacks, "attacks", 1000)
     
     # resolve database files
     db_files = _resolve_database_files(db)
@@ -249,13 +272,14 @@ def query(
 
 
 # ========================= commands ~ management =========================
+
 @app.command()
 def status(
     db: Optional[str] = typer.Option(None, "--db", "-d", help="Database path (auto-detects if not specified)")
 ) -> None:
     """
     Show database status and statistics.
-    
+
     Displays comprehensive information about processed files,
     log counts, date ranges, and database health.
     """
@@ -264,7 +288,7 @@ def status(
     db_path = _auto_detect_database(db)
     
     if not Path(db_path).exists():
-        console.print(f"[red]❌ database not found: {db_path}[/red]")
+        console.print(f"[red]❌ Database not found: {db_path}[/red]")
         _suggest_available_databases()
         raise typer.Exit(1)
     
@@ -273,17 +297,17 @@ def status(
     
     # create status display
     status_content = f"""
-[bold cyan]📊 database statistics[/bold cyan]
+[bold cyan]📊 Database statistics[/bold cyan]
 
-📁 database path: {db_path}
-💽 file size: {stats['database_size_mb']:.1f} mb
-🔍 total log entries: {stats['total_logs']:,}
-📂 processed files: {stats['processed_files']}
+📁 Database path: {db_path}
+💽 File size: {stats['database_size_mb']:.1f} mb
+🔍 Total log entries: {stats['total_logs']:,}
+📂 Processed files: {stats['processed_files']}
 
-[bold cyan]📅 date range[/bold cyan]
+[bold cyan]📅 Date range[/bold cyan]
 {_format_date_range(stats.get('date_range', {}))}
 
-[bold cyan]🚦 top status codes[/bold cyan]
+[bold cyan]🚦 Top status codes[/bold cyan]
 {_format_status_codes(stats.get('top_status_codes', []))}
 """
             
@@ -323,7 +347,7 @@ def clean(
         
         if operations:
             op_list = ", ".join(operations)
-            confirm = typer.confirm(f"this will {op_list}. continue?")
+            confirm = typer.confirm(f"This will {op_list}. continue?")
             if not confirm:
                 console.print("[yellow]Operation cancelled[/yellow]")
                 return
@@ -358,10 +382,11 @@ def clean(
     processor = create_processor(db_path=db_path)
     stats = processor.get_stats()
     
-    console.print(f"[green]✅ Cleanup complete! database now {stats['database_size_mb']:.1f} mb[/green]")
+    console.print(f"[green]✅ Cleanup complete! Database now {stats['database_size_mb']:.1f} mb[/green]")
 
 
 # ========================= database file resolution helpers =========================
+
 def _resolve_database_files(db_arg: Optional[str]) -> List[str]:
     """Resolve database file specification to list of actual files."""
     if not db_arg:
@@ -402,7 +427,7 @@ def _auto_detect_database(db_path: Optional[str]) -> str:
     """
     Auto-detect database file only when unambiguous.
     
-    Rules:
+    rules:
     1. if db_path specified, use it
     2. if exactly one database file exists, use it
     3. otherwise, require explicit specification
@@ -452,6 +477,7 @@ def _suggest_available_databases() -> None:
 
 
 # ========================= query handlers =========================
+
 def _query_single_database(
     db_path: str, top_paths: Optional[int], 
     top_ips: Optional[int], status_codes: bool, methods: bool,
@@ -502,7 +528,7 @@ def _query_single_database(
         display_limit = limit
         
     elif bots:
-        results = query_engine.analyze_bot_activity(bots)
+        results = query_engine.analyse_bot_activity(bots)
         title = f"Top {bots} Bot Activity"
         display_limit = bots
         
@@ -533,7 +559,7 @@ def _query_multiple_databases_separate(
     attacks: Optional[int], export: Optional[str], limit: int
 ) -> None:
     """Query multiple databases separately."""
-    console.print(f"[bold blue]📊 querying {len(db_files)} databases separately[/bold blue]")
+    console.print(f"[bold blue]📊 Querying {len(db_files)} databases separately[/bold blue]")
     
     for i, db_file in enumerate(db_files, 1):
         console.print(f"\n[bold cyan]Database {i}/{len(db_files)}: {Path(db_file).name}[/bold cyan]")
@@ -590,7 +616,7 @@ def _query_multiple_databases_combined(
                 results = query_engine.error_analysis()
                 title = "Combined Error Analysis"
             elif bots:
-                results = query_engine.analyze_bot_activity(bots * len(db_files))
+                results = query_engine.analyse_bot_activity(bots * len(db_files))
                 title = "Combined Bot Activity"
             elif attacks:
                 results = query_engine.detect_security_threats(attacks * len(db_files))
@@ -629,13 +655,14 @@ def _query_multiple_databases_combined(
 
 
 # ========================= display and formatting helpers =========================
+
 def _display_query_results(
     results: List[Dict[str, Any]], title: str, export: Optional[str], 
     limit: int, db_name: Optional[str] = None
 ) -> None:
     """Display query results in a formatted table."""
     if not results:
-        console.print("[yellow]⚠️. No results found[/yellow]")
+        console.print("[yellow]⚠️ No results found[/yellow]")
         return
     
     # export if requested
@@ -716,14 +743,15 @@ def _format_status_codes(status_codes: List[Dict[str, Any]]) -> str:
 
 
 # ========================= path and file validation =========================
+
 def _determine_database_path(logs: str, db: Optional[str], output: Optional[str], verbose: bool = False) -> str:
     """
     Determine the database path using smart defaults.
     
     Priority order:
-    1. explicit --db path (full path with extension)
+    1. Explicit --db path (full path with extension)
     2. --output name (adds .sqlite extension)
-    3. auto-generated from first log file name
+    3. Auto-generated from first log file name
     """
     
     # if explicit db path provided, use it as-is
@@ -806,6 +834,7 @@ def _validate_db_path(db_path: str) -> str:
 
 
 # ========================= main entry point =========================
+
 def main() -> None:
     """Entry point for the cli application."""
     app()
