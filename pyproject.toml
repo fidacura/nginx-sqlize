@@ -5,11 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "nginx-sqlize"
 version = "0.2.1"
-description = "A tool for importing Nginx logs into SQLite for easy querying."
+description = "A tool to import Nginx logs into SQLite for easy querying."
+readme = "README.md"
 license = "GPL-2.0-only"
 requires-python = ">=3.9"
 authors = [
-    {name = "fidacura", email = "hey@fidacura.net"}
+    { name = "fidacura", email = "hey@fidacura.net" }
 ]
 keywords = ["nginx", "logs", "sqlite", "analytics", "cli"]
 classifiers = [
@@ -27,11 +28,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "typer[all]>=0.9.0",       # modern cli with rich integration
-    "rich>=13.0.0",            # beautiful terminal output
-    "polars>=0.20.0",          # high-performance dataframes  
-    "pydantic>=2.0.0",         # data validation and settings
-    "loguru>=0.7.0",           # modern logging
+    "typer[all]>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "loguru>=0.7.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +39,7 @@ dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "black>=23.0.0",
-    "ruff>=0.1.0",             # fast linter (replaces isort + flake8)
+    "ruff>=0.1.0",
     "mypy>=1.5.0",
     "pre-commit>=3.4.0",
 ]
@@ -59,7 +59,6 @@ Documentation = "https://github.com/fidacura/nginx-sqlize#readme"
 Repository = "https://github.com/fidacura/nginx-sqlize.git"
 Issues = "https://github.com/fidacura/nginx-sqlize/issues"
 
-# modern tool configuration
 [tool.hatch.version]
 path = "nginx_sqlize/__init__.py"
 
@@ -71,13 +70,15 @@ include = [
     "/LICENSE",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["nginx_sqlize"]
+
 [tool.black]
 line-length = 88
 target-version = ["py39"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
-  # directories
   \.eggs
   | \.git
   | \.hg
