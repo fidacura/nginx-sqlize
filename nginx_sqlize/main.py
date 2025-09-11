@@ -17,10 +17,13 @@ from rich import print as rprint
 try:
     from .core import create_processor, translate_error_message, validate_positive_int
     from .queries import QueryEngine
+    from . import __version__
 except ImportError:
     # fallback for direct execution
     from core import create_processor, translate_error_message, validate_positive_int
     from queries import QueryEngine
+    import __init__
+    __version__ = __init__.__version__
 
 
 # initialize rich console and typer app
@@ -30,6 +33,31 @@ app = typer.Typer(
     help="Process Nginx logs into SQLite for easy querying and analysis.",
     rich_markup_mode="rich"
 )
+
+
+# ========================= version callback =========================
+
+def version_callback(value: bool):
+    """Show version and exit."""
+    if value:
+        typer.echo(f"nginx-sqlize {__version__}")
+        raise typer.Exit()
+
+# ========================= main callback for version option =========================
+
+@app.callback()
+def main_callback(
+    version: Optional[bool] = typer.Option(
+        None, 
+        "--version", 
+        "-V",
+        callback=version_callback,
+        is_eager=True,
+        help="Show version and exit"
+    )
+):
+    """nginx-sqlize: Process Nginx logs into SQLite for easy querying and analysis."""
+    pass
 
 
 # ========================= commands ~ data ingestion =========================
