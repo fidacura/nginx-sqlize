@@ -17,13 +17,6 @@ except ImportError:
     # fallback for direct execution
     from core import translate_error_message
 
-# optional polars import
-try:
-    import polars as pl
-    HAS_POLARS = True
-except ImportError:
-    HAS_POLARS = False
-
 
 class QueryEngine:
     """

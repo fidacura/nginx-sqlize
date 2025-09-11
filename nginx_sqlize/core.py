@@ -16,14 +16,6 @@ from dataclasses import dataclass
 from loguru import logger
 from pydantic import BaseModel, Field
 
-# optional polars import for advanced analytics
-try:
-    import polars as pl
-    HAS_POLARS = True
-except ImportError:
-    HAS_POLARS = False
-    logger.debug("Polars not available ~ advanced analytics disabled")
-
 # ========================= error management =========================
 
 def translate_error_message(error: Exception, context: str = "") -> str:
@@ -428,7 +420,7 @@ class NginxProcessor:
                 if parse_errors > 0:
                     logger.warning(f"⚠️ {parse_errors} lines could not be parsed")
                 
-                return {"Processed": lines_processed, "inserted": total_inserted}
+                return {"processed": lines_processed, "inserted": total_inserted}
                     
         except Exception as e:
             error_msg = translate_error_message(e, str(filepath))
