@@ -174,22 +174,6 @@ nginx-sqlize clean --duplicates --yes
 | `clean --older-than <period>` | Remove old logs              | `nginx-sqlize clean --older-than 30d`    |
 | `clean --yes`                 | Skip confirmation prompts    | `nginx-sqlize clean --duplicates --yes`  |
 
-### 🎯 Common Workflows
-
-```bash
-# complete analysis workflow
-nginx-sqlize ingest /var/log/nginx/*.log --output website
-nginx-sqlize status --db website.sqlite
-nginx-sqlize query --db website.sqlite --top-paths 20
-nginx-sqlize query --db website.sqlite --attacks 10 --export security-report.json
-
-# maintenance workflow
-nginx-sqlize clean --duplicates --older-than 90d --vacuum --yes
-
-# multi-site analysis
-nginx-sqlize query --db "site1.sqlite,site2.sqlite" --combine --traffic day
-```
-
 ## 🏗️ Architecture
 
 ### Database Schema
