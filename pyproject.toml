@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nginx-sqlize"
-version = "0.2.1"
+version = "0.2.2"
 description = "A tool to import Nginx logs into SQLite for easy querying."
 readme = "README.md"
 license = "GPL-2.0-only"
