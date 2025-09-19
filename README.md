@@ -16,7 +16,7 @@ pip install nginx-sqlize
 git clone https://github.com/fidacura/nginx-sqlize.git
 cd nginx-sqlize
 
-# create virtual environment (recommended)
+# create venv (recommended)
 python -m venv venv
 source venv/bin/activate
 
