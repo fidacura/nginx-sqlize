@@ -2,7 +2,7 @@
 
 A tool for importing Nginx logs into SQLite for easy querying and analysis.
 
-## ⚡ Quick Start
+## Quick Start
 
 ### Installation from PyPI
 
@@ -42,9 +42,9 @@ nginx-sqlize status
 nginx-sqlize clean --duplicates --vacuum
 ```
 
-## 🚀 Detailed Command Usage
+## Detailed Command Usage
 
-### 📥 Ingest Logs
+### Ingest Logs
 
 Process nginx log files into a SQLite database with automatic optimization:
 
@@ -68,7 +68,7 @@ nginx-sqlize ingest /path/to/logs --force
 nginx-sqlize ingest /path/to/logs --verbose
 ```
 
-### 🔍 Query and Analytics
+### Query and Analytics
 
 Powerful querying with pre-built analytics:
 
@@ -98,7 +98,7 @@ nginx-sqlize query --attacks 20
 nginx-sqlize query --top-paths 50 --export results.json
 ```
 
-### 📊 Database Status
+### Database Status
 
 Get comprehensive database information:
 
@@ -110,7 +110,7 @@ nginx-sqlize status
 nginx-sqlize status --db mysite.sqlite
 ```
 
-### 🧹 Database Maintenance
+### Database Maintenance
 
 Keep your database optimized and clean:
 
@@ -128,9 +128,9 @@ nginx-sqlize clean --older-than 1y
 nginx-sqlize clean --duplicates --yes
 ```
 
-## 📋 Command Reference
+## Command Reference
 
-### **📥 Ingestion**
+### **Ingestion**
 
 | Command                   | Description                             | Example                                       |
 | ------------------------- | --------------------------------------- | --------------------------------------------- |
@@ -140,7 +140,7 @@ nginx-sqlize clean --duplicates --yes
 | `ingest --verbose`        | Show detailed processing information    | `nginx-sqlize ingest logs/ --verbose`         |
 | `ingest --batch-size <n>` | Set processing batch size               | `nginx-sqlize ingest logs/ --batch-size 5000` |
 
-### **🔍 Analytics**
+### **Analytics**
 
 | Command                      | Description                 | Example                                  |
 | ---------------------------- | --------------------------- | ---------------------------------------- |
@@ -155,7 +155,7 @@ nginx-sqlize clean --duplicates --yes
 | `query --bots <n>`           | Bot activity detection      | `nginx-sqlize query --bots 10`           |
 | `query --attacks <n>`        | Potential attack patterns   | `nginx-sqlize query --attacks 20`        |
 
-### **💾 Database**
+### **Database**
 
 | Command                 | Description                       | Example                                                       |
 | ----------------------- | --------------------------------- | ------------------------------------------------------------- |
@@ -163,7 +163,7 @@ nginx-sqlize clean --duplicates --yes
 | `query --combine`       | Combine multiple database results | `nginx-sqlize query --db "*.sqlite" --combine --status-codes` |
 | `query --limit <n>`     | Limit number of results           | `nginx-sqlize query --top-paths 5 --limit 5`                  |
 
-### **📊 Management**
+### **Management**
 
 | Command                       | Description                  | Example                                  |
 | ----------------------------- | ---------------------------- | ---------------------------------------- |
@@ -174,7 +174,7 @@ nginx-sqlize clean --duplicates --yes
 | `clean --older-than <period>` | Remove old logs              | `nginx-sqlize clean --older-than 30d`    |
 | `clean --yes`                 | Skip confirmation prompts    | `nginx-sqlize clean --duplicates --yes`  |
 
-## 🏗️ Architecture
+## Architecture
 
 ### Database Schema
 
@@ -207,7 +207,7 @@ CREATE TABLE processed_files (
 );
 ```
 
-## 📈 Use Cases
+## Use Cases
 
 ### System Administration
 
@@ -233,7 +233,7 @@ CREATE TABLE processed_files (
 - **Alerting**: Query-based monitoring and notifications
 - **Reporting**: Automated analytics and dashboard data
 
-## 🛠️ Development
+## Development
 
 ### Setup Development Environment
 
@@ -263,7 +263,7 @@ nginx-sqlize/
 └── README.md
 ```
 
-## 📄 License
+## License
 
 This project is licensed under the GNU General Public License v2.0 ~ see the [LICENSE](LICENSE) file for details.
 
